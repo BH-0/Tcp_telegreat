@@ -16,8 +16,15 @@
 #include <pthread.h>
 #include <sys/errno.h>
 
-#define SERVER_IP	"192.168.11.3"	//ubuntu的ip
+#define SERVER_IP	"192.168.11.67"	//ubuntu的ip
 #define SERVER_PORT	60000
+
+//账号密码
+struct account_password
+{
+    char account[32];  //账号
+    char password[16];  //密码
+};
 
 //存储客户端信息的链表节点
 typedef struct client_t
@@ -25,8 +32,7 @@ typedef struct client_t
     int socket; //存储客户端的套接字
     struct sockaddr_in addr; //地址
     char account[32];  //账号
-    char password[16];  //密码
-    int send_bit; //待发标志    0无数据 1有数据   //等数据发出后才装填 //收发都要监听此标志位
+    volatile int send_bit; //待发标志    0无数据 1有数据   //等数据发出后才装填 //收发都要监听此标志位
     struct info_rdwr *send_buf; //待发数据，用堆空间转存
     struct client_t *prev;
     struct client_t *next;
@@ -64,11 +70,15 @@ void *send_task(void *arg);
 //客户端消息处理线程函数
 void *recv_task(void *arg);
 
+//上下线广播
+//入口参数：自己的节点 ，上下线的功能码
+void online_broadcast(client_t *client_info, int func);
+
 //接收超时
 void rd_timeout(int socket, long sec);
 
 //登陆注册
-int login(int socket_client);
+int login(client_t *client_info);
 
 //初始化服务器
 int server_init(void);

@@ -7,7 +7,7 @@ pthread_rwlock_t client_list_rwlock;
 //读写锁死锁保护函数
 static void handler(void *arg)
 {
-    printf("[%u] is cancelled.\n",(unsigned)pthread_self());
+    printf("[%lu] is cancelled.\n",pthread_self());
     pthread_rwlock_t *pm = (pthread_rwlock_t*)arg;
     pthread_rwlock_unlock(pm);
 }
@@ -17,16 +17,27 @@ void *send_task(void *arg)
 {
     //将自己设置为分离属性
     pthread_detach(pthread_self());
-    //int ret;
     client_t *client_info = (client_t *)arg;
+
     for(;;)
     {
-        if(client_info->send_bit == 1 && client_info->send_buf != NULL)  //有数据要发送
+        if(client_info->send_bit == -1) //进程结束
         {
+//            printf("[%s:%d] goodbye!\n",inet_ntoa(client_info->addr.sin_addr),
+//                    ntohs(client_info->addr.sin_port));
+//            printf("goodbye!\n");
+            return NULL;
+        }
+        else if(client_info->send_bit == 1 && client_info->send_buf != NULL)  //有数据要发送
+        {
+            pthread_cleanup_push(handler,(void*)&client_list_rwlock);    //压栈
+                pthread_rwlock_wrlock(&client_list_rwlock);  //写锁
             send(client_info->socket, client_info->send_buf ,INFO_SIZE(client_info->send_buf->size),0);
             free(client_info->send_buf);
             client_info->send_buf = NULL;
             client_info->send_bit = 0;  //数据已发送
+                pthread_rwlock_unlock(&client_list_rwlock);  //解锁
+            pthread_cleanup_pop(0);    //弹栈，释放保护函数，但不执行此函数
         }
     }
 }
@@ -38,29 +49,68 @@ void *recv_task(void *arg)
     //将自己设置为分离属性
     pthread_detach(pthread_self());
     int ret;
+    client_t *p =NULL;
     static struct info_rdwr recv_buf = {0};
-    //解析地址
+    //获得属于自己的链表节点
     client_t *client_info = (client_t *)arg;
+//    //起个名字
+//    sprintf(client_info->account,"client-1");
+
+    //解析地址
     char *ip = inet_ntoa(client_info->addr.sin_addr);
     int port = ntohs(client_info->addr.sin_port);
 //注册登陆部分**************************************************************
     //登陆注册
-    ret = login(client_info->socket);
+    ret = login(client_info);
     if(ret <= 0)
     {
         printf("client down\n");    //打印下线客户端的信息
+        client_info->send_bit = -1; //通知发送线程结束
         delete_client_t(client_list_store, client_info); //删除客户端链表节点
         close(client_info->socket); //关闭监听套接字
         return NULL;
     }
 //*****************************************************************************
+    usleep(10000);  //10ms
     /*向客户端发送在线列表*/
+    p = client_list_store->head;
     for(int i = 0; i <client_list_store->nodeNumber; i++)
     {
+        while(client_info->send_bit == 1){}    //等待未发送的消息发送完毕
+        pthread_cleanup_push(handler,(void*)&client_list_rwlock);    //压栈
+        pthread_rwlock_wrlock(&client_list_rwlock);  //写锁
 
+        client_info->send_buf = malloc(sizeof(struct info_rdwr));
+        memset(client_info->send_buf, 0, sizeof(struct info_rdwr));
+        client_info->send_buf->other_addr = p->addr;    //在线客户端的地址
+        client_info->send_buf->func = 20;   //客户端列表功能码
+        client_info->send_buf->size = strlen(p->account);
+        strcpy(client_info->send_buf->buf ,p->account); //用户名作为buf
+
+        client_info->send_bit = 1;    //让相应客户端线程发送消息
+        pthread_rwlock_unlock(&client_list_rwlock);  //解锁
+        pthread_cleanup_pop(0);    //弹栈，释放保护函数，但不执行此函数
+        p = p->next;
+        usleep(20000);
     }
+    //尾帧
+    while(client_info->send_bit == 1){}    //等待未发送的消息发送完毕
+    pthread_cleanup_push(handler,(void*)&client_list_rwlock);    //压栈
+    pthread_rwlock_wrlock(&client_list_rwlock);  //写锁
+    client_info->send_buf = malloc(sizeof(struct info_rdwr));
+    memset(client_info->send_buf, 0, sizeof(struct info_rdwr));
+    client_info->send_buf->func = 20;   //客户端列表功能码
+    client_info->send_buf->size = 0;
+    client_info->send_bit = 1;    //让相应客户端线程发送消息
+    pthread_rwlock_unlock(&client_list_rwlock);  //解锁
+    pthread_cleanup_pop(0);    //弹栈，释放保护函数，但不执行此函数
+    usleep(10000);
+
+    /*上线广播*/
+    online_broadcast(client_info , 21);
+
     /*监听客户端*/
-    client_t *p =NULL;
+    p = NULL;
     for(;;)
     {
         memset(&recv_buf, 0, sizeof(recv_buf));
@@ -68,6 +118,10 @@ void *recv_task(void *arg)
         if(ret <= 0)
         {
             printf("client down\n");    //打印下线客户端的信息
+            /*下线广播*/
+            online_broadcast(client_info , 22);
+
+            client_info->send_bit = -1; //通知发送线程结束
             delete_client_t(client_list_store, client_info); //删除客户端链表节点
             close(client_info->socket); //关闭监听套接字
             return NULL;
@@ -101,6 +155,7 @@ void *recv_task(void *arg)
 
 
             /*应答*/
+                while(client_info->send_bit == 1){}    //等待未发送的消息发送完毕
                 client_info->send_buf = malloc(sizeof(struct info_rdwr));
                 memset(client_info->send_buf, 0, sizeof(struct info_rdwr));
                 if(p == NULL)   //转发失败
@@ -125,6 +180,41 @@ void *recv_task(void *arg)
     }
 }
 
+//上下线广播
+//入口参数：自己的节点 ，上下线的功能码
+void online_broadcast(client_t *client_info, int func)
+{
+    client_t *p = NULL;
+    p = client_list_store->head;
+    for(int i = 0; i <client_list_store->nodeNumber; i++)   //遍历链表，寻找那个要删除的节点
+    {
+        if(client_info->addr.sin_addr.s_addr == p->addr.sin_addr.s_addr &&
+           client_info->addr.sin_port == p->addr.sin_port)
+        {
+            p = p->next;
+            continue;//跳过自己
+        }
+        else
+        {
+            while(p->send_bit == 1){}    //等待未发送的消息发送完毕
+            pthread_cleanup_push(handler, (void *) &client_list_rwlock);    //压栈
+                pthread_rwlock_wrlock(&client_list_rwlock);  //写锁
+                p->send_buf = malloc(sizeof(struct info_rdwr));
+                memset(p->send_buf, 0, sizeof(struct info_rdwr));
+                p->send_buf->other_addr = client_info->addr;    //在线客户端的地址
+                p->send_buf->func = func;   //客户端上线下线功能码
+                p->send_buf->size = strlen(p->account);
+                strcpy(p->send_buf->buf ,client_info->account); //用户名作为buf
+                p->send_bit = 1;    //让相应客户端线程发送消息
+                pthread_rwlock_unlock(&client_list_rwlock);  //解锁
+            pthread_cleanup_pop(0);    //弹栈，释放保护函数，但不执行此函数
+        }
+        p = p->next;
+        usleep(10000);
+    }
+}
+
+
 //接收超时
 void rd_timeout(int socket, long sec)
 {
@@ -138,33 +228,38 @@ void rd_timeout(int socket, long sec)
 }
 
 //登陆注册
-int login(int socket_client)
+int login(client_t *client_info)
 {
     int ret = 0;
     //消息超时机制
-    rd_timeout(socket_client, 3);   //3秒超时
+    //rd_timeout(socket_client, 3);   //3秒超时
     for(;;)
     {
         struct info_rdwr recv_buf1 = {0};
         memset(&recv_buf1, 0, sizeof(recv_buf1));
         //接收请求
-        ret = recv(socket_client,&recv_buf1,sizeof(recv_buf1),0);
+        ret = recv(client_info->socket,&recv_buf1,sizeof(recv_buf1),0);
         if(ret <= 0  && errno == EAGAIN)
         {
             perror("消息超时");
-            close(socket_client);   //此处验证超时直接踢掉
-            socket_client = -1;
+            close(client_info->socket);   //此处验证超时直接踢掉
+            client_info->socket = -1;
             return -1;
         }
+        switch(recv_buf1.func)    //判断登陆还是注册
+        {
+            case 1: //请求登陆
+                strcpy(client_info->account, ((struct account_password *)(recv_buf1.buf))->account);
+                break;
+        }
+
         //响应请求
         char send_buf[1024] = "OK";
-        send(socket_client,send_buf,sizeof(send_buf),0);
+        send(client_info->socket,send_buf,sizeof(send_buf),0);
 
-
-
-        rd_timeout(socket_client, 0xFFFF);   //超时恢复
+        //rd_timeout(socket_client, 0xFFFF);   //超时恢复
         printf("登陆成功！\n");
-        return socket_client;
+        return client_info->socket;
     }
 }
 
@@ -263,10 +358,10 @@ client_t  *new_node(struct client_list *listHead, int socket, struct sockaddr_in
     else
         memset(&newNode->account, 0, sizeof(newNode->account));
     //密码赋值
-    if(password != NULL)
-        strcpy(newNode->password, password);
-    else
-        memset(&newNode->password, 0, sizeof(newNode->password));
+//    if(password != NULL)
+//        strcpy(newNode->login.password, password);
+//    else
+//        memset(&newNode->login.password, 0, sizeof(newNode->login.password));
 
     newNode->send_bit = 0;
     //memset(&newNode->send_buf, 0, sizeof(newNode->send_buf));
