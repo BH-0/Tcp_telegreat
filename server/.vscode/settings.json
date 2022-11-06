@@ -1,0 +1,9 @@
+{
+    "makefile.launchConfigurations": [
+        {
+            "cwd": "f:\\Git\\GEC_project\\Tcp_telegreat\\server\\bin",
+            "binaryPath": "f:\\Git\\GEC_project\\Tcp_telegreat\\server\\bin\\server_x86",
+            "binaryArgs": []
+        }
+    ]
+}

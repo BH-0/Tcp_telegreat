@@ -12,7 +12,7 @@ TARGET_arm		:= ./bin/server_arm
 # compile option
 LIBS			+= -lm -lpthread
 #CFLAGS			+= -rdynamic -Wall -pedantic -O0 -Wno-uninitialized
-CFLAGS			+= -Wall -pedantic -O0 -Wno-uninitialized
+CFLAGS			+= -Wall -pedantic -O0 -Wno-uninitialized -g
 LDFLAGS			+= $(LIBS)
 
 C_SOURCE = ./main/main.c ./src/*.c
